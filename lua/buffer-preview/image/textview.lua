@@ -5,6 +5,7 @@
 --- a normal (read-only) buffer so `/` search, `y`, `gf` and friends work.
 local config = require("buffer-preview.config")
 local rasterizer = require("buffer-preview.image.rasterizer")
+local set_lines = require("buffer-preview.util").set_lines
 
 local M = {}
 
@@ -13,18 +14,6 @@ local M = {}
 ---@return string
 local function buffer_name(state, page)
   return string.format("buffer-preview://%s/page-%d.txt", vim.fn.fnamemodify(state.source_path, ":t"), page)
-end
-
----@param buf number
----@param lines string[]
-local function set_lines(buf, lines)
-  if not vim.api.nvim_buf_is_valid(buf) then
-    return
-  end
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].modified = false
 end
 
 ---@param state buffer-preview.ViewerState
@@ -62,7 +51,6 @@ local function open_win(state)
   vim.bo[buf].modifiable = false
   vim.bo[buf].filetype = "markdown"
   vim.b[buf].buffer_preview_handled = true
-  pcall(vim.api.nvim_buf_set_name, buf, buffer_name(state, state.current_page))
 
   state.text_win = win
   state.text_buf = buf

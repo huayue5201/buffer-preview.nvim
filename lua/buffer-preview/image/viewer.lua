@@ -9,6 +9,7 @@ local converter = require("buffer-preview.image.converter")
 local rasterizer = require("buffer-preview.image.rasterizer")
 local display = require("buffer-preview.image.display")
 local textview = require("buffer-preview.image.textview")
+local set_lines = require("buffer-preview.util").set_lines
 
 local M = {}
 
@@ -100,16 +101,7 @@ local function update_status(state, win)
   end
   lines[#lines + 1] = status
 
-  local view = vim.api.nvim_win_call(win, function()
-    return vim.fn.winsaveview()
-  end)
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].modified = false
-  pcall(vim.api.nvim_win_call, win, function()
-    vim.fn.winrestview(view)
-  end)
+  set_lines(buf, lines, win)
 end
 
 --- Render the current page image and overlay it on the buffer.
@@ -455,24 +447,30 @@ function M.state_for_buf(buf)
   return M._states[buf]
 end
 
---- Toggle the page-text panel for the preview in the current buffer.
-function M.toggle_text()
+--- Current buffer's preview state, warning the user when it is not one.
+---@return buffer-preview.ViewerState?
+local function preview_state()
   local state = M.state_for_buf()
   if not state then
     vim.notify("buffer-preview.nvim: not a preview buffer", vim.log.levels.WARN)
-    return
   end
-  textview.toggle(state)
+  return state
+end
+
+--- Toggle the page-text panel for the preview in the current buffer.
+function M.toggle_text()
+  local state = preview_state()
+  if state then
+    textview.toggle(state)
+  end
 end
 
 --- Copy the current page's text.
 function M.yank_page_text()
-  local state = M.state_for_buf()
-  if not state then
-    vim.notify("buffer-preview.nvim: not a preview buffer", vim.log.levels.WARN)
-    return
+  local state = preview_state()
+  if state then
+    textview.yank(state)
   end
-  textview.yank(state)
 end
 
 --- Open a supported file in the current buffer as a read-only image viewer.

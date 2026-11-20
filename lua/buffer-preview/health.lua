@@ -3,18 +3,12 @@ local config = require("buffer-preview.config")
 
 local M = {}
 
----@param name string
----@return boolean
-local function binary(name)
-  return vim.fn.executable(name) == 1
-end
-
 ---@param h table
 ---@param name string
 ---@param hint string
 ---@param required boolean
 local function report_binary(h, name, hint, required)
-  if binary(name) then
+  if vim.fn.executable(name) == 1 then
     h.ok(name .. " found")
   elseif required then
     h.error(name .. " not found", { hint })

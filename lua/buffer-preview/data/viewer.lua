@@ -42,16 +42,16 @@ local STARTER_HINT = vim.list_extend(
   vim.split(vim.trim(SCHEMA_QUERY), "\n", { plain = true })
 )
 
----@param buf number
----@param lines string[]
-local function set_top_lines(buf, lines)
-  if not vim.api.nvim_buf_is_valid(buf) then
-    return
+local set_top_lines = require("buffer-preview.util").set_lines
+
+--- The SQL currently in the bottom buffer (empty when it is all whitespace).
+---@param state buffer-preview.SqliteState
+---@return string
+local function bottom_sql(state)
+  if not vim.api.nvim_buf_is_valid(state.bottom_buf) then
+    return ""
   end
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].modified = false
+  return table.concat(vim.api.nvim_buf_get_lines(state.bottom_buf, 0, -1, false), "\n")
 end
 
 ---@param state buffer-preview.SqliteState
@@ -122,11 +122,7 @@ end
 ---@param state buffer-preview.SqliteState
 ---@param on_done? fun()
 local function run_query(state, on_done)
-  if not vim.api.nvim_buf_is_valid(state.bottom_buf) then
-    return
-  end
-  local lines = vim.api.nvim_buf_get_lines(state.bottom_buf, 0, -1, false)
-  local sql = table.concat(lines, "\n")
+  local sql = bottom_sql(state)
   if sql:match("^%s*$") then
     set_top_lines(state.top_buf, { "-- empty query" })
     return
@@ -143,10 +139,7 @@ local function setup_bottom(state)
   end, { desc = "Run SQL from the buffer-preview.nvim SQLite workspace" })
 
   vim.api.nvim_buf_create_user_command(state.bottom_buf, "BufferPreviewExport", function(opts)
-    if not vim.api.nvim_buf_is_valid(state.bottom_buf) then
-      return
-    end
-    local sql = table.concat(vim.api.nvim_buf_get_lines(state.bottom_buf, 0, -1, false), "\n")
+    local sql = bottom_sql(state)
     if sql:match("^%s*$") then
       vim.notify("buffer-preview.nvim: nothing to export", vim.log.levels.WARN)
       return

@@ -1,26 +1,14 @@
 --- buffer-preview.nvim — hijack supported buffers as previews.
 local group = vim.api.nvim_create_augroup("BufferPreviewNvim", { clear = true })
 
+--- Backends in load order. `patterns` is derived from `exts` so the list of
+--- supported extensions lives in exactly one place.
 local backends = {
   {
-    patterns = {
-      "*.pdf",
-      "*.pptx",
-      "*.ppt",
-      "*.odp",
-      "*.docx",
-      "*.doc",
-      "*.odt",
-      "*.rtf",
-      "*.xlsx",
-      "*.xls",
-      "*.ods",
-    },
     module = "buffer-preview.image.viewer",
     exts = { "pdf", "pptx", "ppt", "odp", "docx", "doc", "odt", "rtf", "xlsx", "xls", "ods" },
   },
   {
-    patterns = { "*.db", "*.sqlite", "*.sqlite3" },
     module = "buffer-preview.data.viewer",
     exts = { "db", "sqlite", "sqlite3" },
   },
@@ -33,6 +21,13 @@ local function path_has_ext(path, exts)
     end
   end
   return false
+end
+
+for _, backend in ipairs(backends) do
+  backend.patterns = {}
+  for _, ext in ipairs(backend.exts) do
+    backend.patterns[#backend.patterns + 1] = "*." .. ext
+  end
 end
 
 for _, backend in ipairs(backends) do -- Primary path: intercept the buffer before Neovim reads raw bytes.

@@ -114,12 +114,18 @@ end
 ---@param callback fun(png_path: string|nil, err: string|nil)
 ---@param dpi? number Override the configured dpi (used for zoom)
 ---@return buffer-preview.AsyncJobCancel|nil token that cancels the rasterization
+---@param cache_dir string
+---@param page_num number
+---@return string page_prefix, string png_path
+local function page_paths(cache_dir, page_num)
+  local prefix = cache_dir .. "/page-" .. page_num
+  return prefix, prefix .. ".png"
+end
+
 function M.rasterize_page(pdf_path, page_num, callback, dpi)
   local cfg = config.get()
   dpi = dpi or cfg.dpi
-  local cache_dir = M.get_cache_dir(pdf_path, dpi)
-  local output_prefix = cache_dir .. "/page-" .. page_num
-  local output_path = output_prefix .. ".png"
+  local output_prefix, output_path = page_paths(M.get_cache_dir(pdf_path, dpi), page_num)
 
   if is_cache_fresh(output_path, pdf_path) then
     callback(output_path, nil)
@@ -229,7 +235,7 @@ function M.prefetch(pdf_path, page_num, dpi)
   if page_num < 1 then
     return
   end
-  if M._inflight[M.get_cache_dir(pdf_path, dpi) .. "/page-" .. page_num] then
+  if M._inflight[page_paths(M.get_cache_dir(pdf_path, dpi), page_num)] then
     return
   end
   M.rasterize_page(pdf_path, page_num, function() end, dpi)
@@ -271,13 +277,6 @@ function M.page_text(pdf_path, page_num, callback)
   end)
 end
 
---- Remove all cached page images for a PDF file.
----@param pdf_path string
-function M.cleanup(pdf_path)
-  local cache_dir = M.get_cache_dir(pdf_path)
-  vim.fn.delete(cache_dir, "rf")
-end
-
 --- Size of a path in bytes (blocking; only used off the hot path).
 ---@param path string
 ---@return number
@@ -287,20 +286,50 @@ function M.path_size(path)
   return (kb or 0) * 1024
 end
 
---- Delete the oldest cache units until the cache fits in `max_cache_size_mb`.
----
 --- Cache units are the per-document hash directories, both for rasterized
---- pages and converted PDFs. Age comes from mtime, so recently previewed
---- documents survive.
+--- pages and converted PDFs, plus the extracted-text directory one level down.
+--- Both pruning strategies (age and total size) work on this list.
+---@param with_size boolean
+---@return { path: string, size: number, mtime: number }[]
+local function cache_units(with_size)
+  local root = config.get().cache_dir
+  local units = {}
+  for _, base in ipairs({ root, root .. "/converted" }) do
+    local ok, iter = pcall(vim.fs.dir, base)
+    if ok then
+      for name, kind in iter do
+        local path = base .. "/" .. name
+        local stat = vim.uv.fs_stat(path)
+        if kind == "directory" and stat then
+          units[#units + 1] = {
+            path = path,
+            size = with_size and M.path_size(path) or 0,
+            mtime = stat.mtime and stat.mtime.sec or 0,
+          }
+        end
+      end
+    end
+  end
+  return units
+end
+
 ---@param callback? fun(removed: number)
-function M.enforce_cache_limit(callback)
-  local cfg = config.get()
-  local limit_mb = cfg.max_cache_size_mb
-  local done = function(removed)
+---@return fun(removed: number)
+local function finish(callback)
+  return function(removed)
     if callback then
       callback(removed)
     end
   end
+end
+
+--- Delete the oldest cache units until the cache fits in `max_cache_size_mb`.
+--- Age comes from mtime, so recently previewed documents survive.
+---@param callback? fun(removed: number)
+function M.enforce_cache_limit(callback)
+  local cfg = config.get()
+  local limit_mb = cfg.max_cache_size_mb
+  local done = finish(callback)
 
   if type(limit_mb) ~= "number" or limit_mb <= 0 then
     done(0)
@@ -310,31 +339,12 @@ function M.enforce_cache_limit(callback)
   local limit = limit_mb * 1024 * 1024
 
   vim.schedule(function()
-    local root = cfg.cache_dir
-    if vim.fn.isdirectory(root) ~= 1 then
+    if vim.fn.isdirectory(cfg.cache_dir) ~= 1 then
       done(0)
       return
     end
 
-    ---@type { path: string, size: number, mtime: number }[]
-    local units = {}
-    for _, base in ipairs({ root, root .. "/converted" }) do
-      local ok, iter = pcall(vim.fs.dir, base)
-      if ok then
-        for name, kind in iter do
-          local path = base .. "/" .. name
-          local stat = vim.uv.fs_stat(path)
-          if kind == "directory" and stat then
-            units[#units + 1] = {
-              path = path,
-              size = M.path_size(path),
-              mtime = stat.mtime and stat.mtime.sec or 0,
-            }
-          end
-        end
-      end
-    end
-
+    local units = cache_units(true)
     local total = 0
     for _, unit in ipairs(units) do
       total = total + unit.size
@@ -367,54 +377,28 @@ end
 function M.prune(callback)
   local cfg = config.get()
   local max_age_days = cfg.cache_max_age_days
-  if type(max_age_days) ~= "number" or max_age_days <= 0 then
-    if callback then
-      callback(0)
-    end
-    return
-  end
+  local done = finish(callback)
 
-  local root = cfg.cache_dir
-  if vim.fn.isdirectory(root) ~= 1 then
-    if callback then
-      callback(0)
-    end
+  if type(max_age_days) ~= "number" or max_age_days <= 0 then
+    done(0)
     return
   end
 
   local cutoff = os.time() - math.floor(max_age_days * 86400)
-  local removed = 0
-
-  local function prune_leaf(root_dir)
-    local ok, entries = pcall(vim.fs.dir, root_dir)
-    if not ok then
-      return
-    end
-    for name, kind in entries do
-      local path = root_dir .. "/" .. name
-      if kind == "directory" then
-        local stat = vim.uv.fs_stat(path)
-        -- Both the rasterized pages and the converted PDFs live one level
-        -- below a hash directory, so a stale hash directory is the unit of
-        -- deletion here.
-        if stat and stat.mtime and stat.mtime.sec < cutoff then
-          if vim.fn.delete(path, "rf") == 0 then
-            removed = removed + 1
-          end
-        end
-      end
-    end
-  end
 
   vim.schedule(function()
-    prune_leaf(root)
-    local converted = root .. "/converted"
-    if vim.fn.isdirectory(converted) == 1 then
-      prune_leaf(converted)
+    if vim.fn.isdirectory(cfg.cache_dir) ~= 1 then
+      done(0)
+      return
     end
-    if callback then
-      callback(removed)
+
+    local removed = 0
+    for _, unit in ipairs(cache_units(false)) do
+      if unit.mtime < cutoff and vim.fn.delete(unit.path, "rf") == 0 then
+        removed = removed + 1
+      end
     end
+    done(removed)
   end)
 end
 
