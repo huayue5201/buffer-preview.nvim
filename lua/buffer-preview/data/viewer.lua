@@ -15,6 +15,7 @@ local M = {}
 ---@field top_win number|nil    -- window currently in the "top" role (showing top_buf)
 ---@field bottom_win number|nil -- window currently in the "bottom" role (showing bottom_buf)
 ---@field augroup number
+---@field query_token number|nil Monotonic query id, invalidates stale results
 
 ---@type table<number, buffer-preview.SqliteState>
 M._states = {}
@@ -55,6 +56,10 @@ end
 ---@param state buffer-preview.SqliteState
 ---@param result { ok: boolean, output: string[], err: string|nil }
 local function render_result(state, result)
+  if M._states[state.top_buf] ~= state then
+    return
+  end
+
   if result.ok then
     if #result.output == 0 then
       set_top_lines(state.top_buf, { "Query executed successfully" })
@@ -71,8 +76,35 @@ local function render_result(state, result)
   set_top_lines(state.top_buf, lines)
 end
 
+--- Run SQL asynchronously, rendering the result into the top buffer.
+--- Results of a superseded query are dropped, so hitting `:w` twice quickly
+--- cannot render the older answer on top of the newer one.
 ---@param state buffer-preview.SqliteState
-local function run_query(state)
+---@param sql string
+---@param on_done? fun()
+local function run_sql(state, sql, on_done)
+  if M._states[state.top_buf] ~= state then
+    return
+  end
+
+  state.query_token = (state.query_token or 0) + 1
+  local token = state.query_token
+  set_top_lines(state.top_buf, { "-- Running…" })
+
+  runner.run(state.db_path, sql, function(result)
+    if M._states[state.top_buf] ~= state or state.query_token ~= token then
+      return
+    end
+    render_result(state, result)
+    if on_done then
+      on_done()
+    end
+  end)
+end
+
+---@param state buffer-preview.SqliteState
+---@param on_done? fun()
+local function run_query(state, on_done)
   if not vim.api.nvim_buf_is_valid(state.bottom_buf) then
     return
   end
@@ -82,14 +114,15 @@ local function run_query(state)
     set_top_lines(state.top_buf, { "-- empty query" })
     return
   end
-  render_result(state, runner.run(state.db_path, sql))
+  run_sql(state, sql, on_done)
 end
 
 ---@param state buffer-preview.SqliteState
 local function setup_bottom(state)
   vim.api.nvim_buf_create_user_command(state.bottom_buf, "BufferPreviewRunQuery", function()
-    run_query(state)
-    vim.bo[state.bottom_buf].modified = false
+    run_query(state, function()
+      vim.bo[state.bottom_buf].modified = false
+    end)
   end, { desc = "Run SQL from the buffer-preview.nvim SQLite workspace" })
 end
 
@@ -289,8 +322,10 @@ local function setup_autocmds(state)
     group = group,
     buffer = state.bottom_buf,
     callback = function()
-      run_query(state)
+      -- Clear the modified flag right away: the buffer contents are what we
+      -- just captured, and a slow query must not keep `:w` half-applied.
       vim.bo[state.bottom_buf].modified = false
+      run_query(state)
     end,
   })
 end
@@ -360,7 +395,7 @@ function M.open(source_path)
   setup_bottom(state)
   setup_autocmds(state)
 
-  render_result(state, runner.run(source_path, SCHEMA_QUERY))
+  run_sql(state, SCHEMA_QUERY)
 
   return state
 end

@@ -23,8 +23,7 @@ local function path_has_ext(path, exts)
   return false
 end
 
-for _, backend in ipairs(backends) do
-  -- Primary path: intercept the buffer before Neovim reads raw bytes.
+for _, backend in ipairs(backends) do  -- Primary path: intercept the buffer before Neovim reads raw bytes.
   vim.api.nvim_create_autocmd("BufReadCmd", {
     pattern = backend.patterns,
     group = group,
@@ -59,3 +58,16 @@ for _, backend in ipairs(backends) do
     end,
   })
 end
+
+-- Render caches grow with every opened document; give the user an explicit
+-- way to reclaim the space (stale entries are also pruned automatically, see
+-- `cache_max_age_days`).
+vim.api.nvim_create_user_command("BufferPreviewCleanCache", function()
+  local cfg = require("buffer-preview.config").get()
+  local removed = vim.fn.delete(cfg.cache_dir, "rf")
+  vim.notify(
+    removed == 0 and ("buffer-preview.nvim: removed " .. cfg.cache_dir) or ("buffer-preview.nvim: could not remove " .. cfg.cache_dir),
+    removed == 0 and vim.log.levels.INFO or vim.log.levels.WARN,
+    { title = "buffer-preview.nvim" }
+  )
+end, { desc = "Delete the buffer-preview.nvim page/conversion cache" })
