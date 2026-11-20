@@ -3,9 +3,21 @@ local group = vim.api.nvim_create_augroup("BufferPreviewNvim", { clear = true })
 
 local backends = {
   {
-    patterns = { "*.pdf", "*.pptx", "*.ppt", "*.odp" },
+    patterns = {
+      "*.pdf",
+      "*.pptx",
+      "*.ppt",
+      "*.odp",
+      "*.docx",
+      "*.doc",
+      "*.odt",
+      "*.rtf",
+      "*.xlsx",
+      "*.xls",
+      "*.ods",
+    },
     module = "buffer-preview.image.viewer",
-    exts = { "pdf", "pptx", "ppt", "odp" },
+    exts = { "pdf", "pptx", "ppt", "odp", "docx", "doc", "odt", "rtf", "xlsx", "xls", "ods" },
   },
   {
     patterns = { "*.db", "*.sqlite", "*.sqlite3" },
@@ -23,7 +35,7 @@ local function path_has_ext(path, exts)
   return false
 end
 
-for _, backend in ipairs(backends) do  -- Primary path: intercept the buffer before Neovim reads raw bytes.
+for _, backend in ipairs(backends) do -- Primary path: intercept the buffer before Neovim reads raw bytes.
   vim.api.nvim_create_autocmd("BufReadCmd", {
     pattern = backend.patterns,
     group = group,
@@ -66,8 +78,19 @@ vim.api.nvim_create_user_command("BufferPreviewCleanCache", function()
   local cfg = require("buffer-preview.config").get()
   local removed = vim.fn.delete(cfg.cache_dir, "rf")
   vim.notify(
-    removed == 0 and ("buffer-preview.nvim: removed " .. cfg.cache_dir) or ("buffer-preview.nvim: could not remove " .. cfg.cache_dir),
+    removed == 0 and ("buffer-preview.nvim: removed " .. cfg.cache_dir)
+      or ("buffer-preview.nvim: could not remove " .. cfg.cache_dir),
     removed == 0 and vim.log.levels.INFO or vim.log.levels.WARN,
     { title = "buffer-preview.nvim" }
   )
 end, { desc = "Delete the buffer-preview.nvim page/conversion cache" })
+
+-- The preview is a picture; these commands expose the real text of the
+-- current page for searching, copying and yanking.
+vim.api.nvim_create_user_command("BufferPreviewText", function()
+  require("buffer-preview.image.viewer").toggle_text()
+end, { desc = "Toggle the page-text panel of the current preview" })
+
+vim.api.nvim_create_user_command("BufferPreviewYankText", function()
+  require("buffer-preview.image.viewer").yank_page_text()
+end, { desc = "Copy the text of the current preview page" })

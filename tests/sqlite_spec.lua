@@ -104,9 +104,12 @@ describe("buffer-preview.data.viewer", function()
     assert.equals(true, vim.bo[state.bottom_buf].modifiable)
 
     local top_lines = vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false)
-    assert.is_true(wait_until(function()
-      return top_text(state):match("CREATE TABLE t") ~= nil
-    end), table.concat(top_lines, "\n"))
+    assert.is_true(
+      wait_until(function()
+        return top_text(state):match("CREATE TABLE t") ~= nil
+      end),
+      table.concat(top_lines, "\n")
+    )
     local top_text_value = top_text(state)
     assert.is_truthy(top_text_value:match("table"))
     assert.is_truthy(top_text_value:match("t"))
@@ -122,10 +125,13 @@ describe("buffer-preview.data.viewer", function()
       vim.cmd("silent write")
     end)
 
-    assert.is_true(wait_until(function()
-      local text = top_text(state)
-      return text:match("alice") ~= nil and text:match("bob") ~= nil
-    end), top_text(state))
+    assert.is_true(
+      wait_until(function()
+        local text = top_text(state)
+        return text:match("alice") ~= nil and text:match("bob") ~= nil
+      end),
+      top_text(state)
+    )
 
     local bottom_after = vim.api.nvim_buf_get_lines(state.bottom_buf, 0, -1, false)
     assert.are.same(sql, bottom_after)
@@ -143,10 +149,13 @@ describe("buffer-preview.data.viewer", function()
       vim.cmd("BufferPreviewRunQuery")
     end)
 
-    assert.is_true(wait_until(function()
-      local lines = vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false)
-      return #lines == 1 and lines[1] == "Query executed successfully"
-    end), top_text(state))
+    assert.is_true(
+      wait_until(function()
+        local lines = vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false)
+        return #lines == 1 and lines[1] == "Query executed successfully"
+      end),
+      top_text(state)
+    )
     assert.are.same({ "Query executed successfully" }, vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false))
   end)
 
@@ -161,9 +170,12 @@ describe("buffer-preview.data.viewer", function()
       vim.cmd("BufferPreviewRunQuery")
     end)
 
-    assert.is_true(wait_until(function()
-      return top_text(state):lower():match("no such table") ~= nil
-    end), top_text(state))
+    assert.is_true(
+      wait_until(function()
+        return top_text(state):lower():match("no such table") ~= nil
+      end),
+      top_text(state)
+    )
     local top = top_text(state)
     assert.is_truthy(top:match("-- Error"))
     assert.is_truthy(top:lower():match("no such table"))

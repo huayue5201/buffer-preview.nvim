@@ -7,7 +7,9 @@ Table of Contents                                 *buffer-preview.nvim-toc*
 2. Requirements                   |buffer-preview-requirements|
 3. Configuration                  |buffer-preview-configuration|
 4. Navigation                     |buffer-preview-navigation|
-5. SQLite                         |buffer-preview-sqlite|
+5. Page text                      |buffer-preview-text|
+6. SQLite                         |buffer-preview-sqlite|
+7. Commands and health            |buffer-preview-commands|
 
 ==============================================================================
 1. buffer-preview.nvim              *buffer-preview-introduction*
@@ -17,23 +19,29 @@ Instead of opening supported files as editable text, it intercepts the load
 and replaces the buffer with a format-specific preview. Currently implements:
 
 - PDF preview
-- Presentation preview (`.pptx`, `.ppt`, `.odp`) through headless `soffice`
-  conversion, with image rendering delegated to image.nvim
+- Office document preview (`.pptx`, `.ppt`, `.odp`, `.docx`, `.doc`, `.odt`,
+  `.rtf`, `.xlsx`, `.xls`, `.ods`) through headless `soffice` conversion, with
+  image rendering delegated to image.nvim
 - SQLite preview (`.db`, `.sqlite`, `.sqlite3`) via the `sqlite3` CLI, with a
   two-buffer workspace for running arbitrary queries
+- Page text side channel (requires `pdftotext`): searchable, copyable text for
+  the page being displayed
 
 ==============================================================================
 2. Requirements                     *buffer-preview-requirements*
 
 The requirements depends on which preview you want, install only what you need.
 
-Image preview (PDF, `.pptx`, `.ppt`, `.odp`):
+Image preview (PDF, office documents):
 
 - `image.nvim`: handles image rendering
 - `ImageMagick`: required by image.nvim
 - `pdftoppm`: required to convert pdf to png
 - `pdfinfo`: required to show pdf metadata
-- `soffice`: for presentation conversion (.pptx, .ppt, .odp)
+- `pdftotext`: optional, enables the page text panel and `y`
+- `soffice`: for office document conversion (.pptx, .docx, .xlsx, ...)
+
+`:checkhealth buffer-preview` reports which of these are missing.
 
 Data preview (`.db`, `.sqlite`, `.sqlite3`):
 
@@ -45,32 +53,46 @@ Data preview (`.db`, `.sqlite`, `.sqlite3`):
 Call: >
     require("buffer-preview").setup({...})
 
-Current options configure the PDF / presentation rendering backend: >
+All options are optional: >
 
     require("buffer-preview").setup({
       rasterizer = "pdftoppm",              -- or "pdftocairo"
-      dpi = 200,                            -- rasterization DPI
+      dpi = 200,                            -- base rasterization DPI
       cache_dir = vim.fn.stdpath("cache")
                   .. "/buffer-preview.nvim", -- rendered page cache
       cache_max_age_days = 30,              -- prune older cache entries
+      max_cache_size_mb = 500,              -- hard size cap (false = no cap)
+      prefetch = true,                      -- rasterize the next page ahead
+      zoom_step = 1.25,                     -- multiplier for +/- zoom
+      sqlite_max_rows = 1000,               -- rows rendered in result buffer
+      keymaps = { ... },                    -- see |buffer-preview-navigation|
     })
 
-Rendering is asynchronous: converting a presentation, reading the page count
-and rasterizing a page all run in the background, so the UI stays responsive
-on large documents.  While a document loads the buffer shows its status line
-with a `Loading...` hint instead of an empty window.
+Rendering is asynchronous: converting an office document, reading the page
+count and rasterizing a page all run in the background, so the UI stays
+responsive on large documents.  While a document loads the buffer shows its
+status line with a `Loading...` hint instead of an empty window.
 
-Cached pages are keyed by document path, rasterizer and `dpi`, and are
-invalidated when the source file changes.  Set `cache_max_age_days` to
-`false` to keep cached pages indefinitely.  `:BufferPreviewCleanCache` deletes
-the cache directory.
+Cached pages are keyed by document path, rasterizer and the effective DPI and
+are invalidated when the source file changes.  Set `cache_max_age_days` to
+`false` to keep cached pages indefinitely; `max_cache_size_mb` deletes the
+least recently used entries once the cache grows past the cap.
 
-The SQLite backend has no configuration.
+Pass `keymaps = false` to disable every buffer-local mapping and use your own: >
+
+    keymaps = {
+      next_page = { "j", "<Down>" },  prev_page = { "k", "<Up>" },
+      first_page = "g",               last_page = "G",
+      zoom_in = "+",                  zoom_out = "-",  zoom_reset = "=",
+      page_text = "t",                yank_page_text = "y",
+      refresh = { "r", "<C-l>" },     close = "q",
+    }
+<
 
 ==============================================================================
 4. Navigation                       *buffer-preview-navigation*
 
-The PDF / presentation buffer is non-editable.  The displayed page rescales
+The document buffer is non-editable.  The displayed page rescales
 automatically when the window is resized (`:vsplit`, `<C-w><`, terminal resize).
 Only the following keys are active:
 
@@ -79,11 +101,34 @@ Only the following keys are active:
   g                                                               First page
   G                                                               Last page
   {number}G                                                       Go to page {number}
+  + / -                                                           Zoom in / out
+  =                                                               Reset zoom
+  t                                                               Toggle page text panel
+  y                                                               Yank the page text
   r, <C-l>                                                        Refresh display
   q                                                               Close viewer
 
+Zoom re-rasterizes at `dpi * zoom`, so the page stays sharp instead of being
+stretched.  The next page is rasterized in the background (`prefetch`), which
+makes plain `j`/`k` navigation nearly instant on cached documents.
+
 ==============================================================================
-5. SQLite                           *buffer-preview-sqlite*
+5. Page text                        *buffer-preview-text*
+
+PDF and converted office documents keep their text layer.  When `pdftotext` is
+available:
+
+  t                          Open (or close) a side panel with the text of the
+                             current page.  It follows page changes, so you can
+                             use normal Vim search (`/`) and copy from it.
+  y                          Copy the current page text to the unnamed register.
+  :BufferPreviewText         Same as `t`.
+  :BufferPreviewYankText     Same as `y`.
+
+The panel is plain text, so `grep`, `:vimgrep`, folds and registers work on it.
+
+==============================================================================
+6. SQLite                           *buffer-preview-sqlite*
 
 Opening a `.db`, `.sqlite`, or `.sqlite3` file spawns a two-buffer workspace:
 
@@ -100,7 +145,15 @@ Running SQL:
   :BufferPreviewRunQuery    Run the entire bottom buffer as SQL
 
 Queries run in the background; the top buffer shows `-- Running...` until the
-result is rendered. Only the newest query's result is displayed.
+result is rendered. Only the newest query's result is displayed.  Results are
+capped at `sqlite_max_rows` rows; when the cap is hit a note points at
+`:BufferPreviewExport`, which writes the full result of the last query to a
+CSV file: >
+
+    :BufferPreviewExport /tmp/report.csv
+<
+
+Export runs in the background as well.
 
 Saving the SQL buffer with `:w` hijacks the write via |BufWriteCmd| — nothing
 touches disk, the SQL just runs and the result renders into the top buffer.
@@ -110,5 +163,16 @@ statements render `Query executed successfully` in the top buffer; errors
 render `-- Error` followed by the `sqlite3` stderr output.
 
 Closing either buffer tears down the workspace.
+
+==============================================================================
+7. Commands and health            *buffer-preview-commands*
+
+  :BufferPreviewCleanCache          Delete the page/conversion cache.
+  :BufferPreviewRunQuery            SQLite: run the bottom buffer.
+  :BufferPreviewExport {file}       SQLite: export the last result as CSV.
+  :BufferPreviewText                Toggle the page text panel.
+  :BufferPreviewYankText            Yank the current page text.
+  :checkhealth buffer-preview       Report missing dependencies and the
+                                    current cache size.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

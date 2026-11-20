@@ -4,6 +4,7 @@
 ---   * bottom buffer — editable SQL input buffer
 --- The bottom buffer runs arbitrary SQL through the sqlite3 CLI and renders
 --- the result into the top buffer.
+local config = require("buffer-preview.config")
 local runner = require("buffer-preview.data.runner")
 
 local M = {}
@@ -63,9 +64,25 @@ local function render_result(state, result)
   if result.ok then
     if #result.output == 0 then
       set_top_lines(state.top_buf, { "Query executed successfully" })
-    else
-      set_top_lines(state.top_buf, result.output)
+      return
     end
+
+    local max_rows = config.get().sqlite_max_rows
+    local output = result.output
+    if type(max_rows) == "number" and max_rows > 0 and #output > max_rows + 1 then
+      local hidden = #output - (max_rows + 1)
+      local shown = {}
+      for i = 1, max_rows + 1 do
+        shown[i] = output[i]
+      end
+      shown[#shown + 1] = string.format(
+        "-- … %d more rows not shown (sqlite_max_rows = %d; :BufferPreviewExport <file> saves the full result)",
+        hidden,
+        max_rows
+      )
+      output = shown
+    end
+    set_top_lines(state.top_buf, output)
     return
   end
 
@@ -124,6 +141,25 @@ local function setup_bottom(state)
       vim.bo[state.bottom_buf].modified = false
     end)
   end, { desc = "Run SQL from the buffer-preview.nvim SQLite workspace" })
+
+  vim.api.nvim_buf_create_user_command(state.bottom_buf, "BufferPreviewExport", function(opts)
+    if not vim.api.nvim_buf_is_valid(state.bottom_buf) then
+      return
+    end
+    local sql = table.concat(vim.api.nvim_buf_get_lines(state.bottom_buf, 0, -1, false), "\n")
+    if sql:match("^%s*$") then
+      vim.notify("buffer-preview.nvim: nothing to export", vim.log.levels.WARN)
+      return
+    end
+    local out_path = vim.fn.fnamemodify(opts.args, ":p")
+    runner.export(state.db_path, sql, out_path, function(ok, err)
+      if ok then
+        vim.notify("buffer-preview.nvim: exported result to " .. out_path, vim.log.levels.INFO)
+      else
+        vim.notify(err or "buffer-preview.nvim: export failed", vim.log.levels.ERROR)
+      end
+    end)
+  end, { nargs = 1, complete = "file", desc = "Export the result of the current query as CSV" })
 end
 
 ---@param win number|nil
@@ -309,12 +345,20 @@ local function setup_autocmds(state)
   vim.api.nvim_create_autocmd("BufUnload", {
     group = group,
     buffer = state.top_buf,
-    callback = function() if not syncing then kill_workspace() end end,
+    callback = function()
+      if not syncing then
+        kill_workspace()
+      end
+    end,
   })
   vim.api.nvim_create_autocmd("BufUnload", {
     group = group,
     buffer = state.bottom_buf,
-    callback = function() if not syncing then kill_workspace() end end,
+    callback = function()
+      if not syncing then
+        kill_workspace()
+      end
+    end,
   })
 
   -- `:w` on the SQL buffer runs the query.
@@ -342,10 +386,7 @@ function M.open(source_path)
   end
 
   if not runner.is_available() then
-    vim.notify(
-      "buffer-preview.nvim: sqlite3 CLI is required but not found in PATH",
-      vim.log.levels.ERROR
-    )
+    vim.notify("buffer-preview.nvim: sqlite3 CLI is required but not found in PATH", vim.log.levels.ERROR)
     return nil
   end
 

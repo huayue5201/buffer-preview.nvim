@@ -1,12 +1,14 @@
 --- PDF viewer buffer management for buffer-preview.nvim.
 --- Handles buffer hijacking, keymaps, page state, and display lifecycle.
 ---
---- The pipeline is asynchronous end to end: converting a presentation,
---- reading the page count and rasterizing a page all run through
---- `vim.system`, so the UI keeps responding on large documents.
+--- The pipeline is asynchronous end to end: converting a document, reading
+--- the page count and rasterizing a page all run through `vim.system`, so the
+--- UI keeps responding on large documents.
+local config = require("buffer-preview.config")
 local converter = require("buffer-preview.image.converter")
 local rasterizer = require("buffer-preview.image.rasterizer")
 local display = require("buffer-preview.image.display")
+local textview = require("buffer-preview.image.textview")
 
 local M = {}
 
@@ -22,6 +24,13 @@ local M = {}
 ---@field ready boolean
 ---@field req number Monotonic rasterization request id
 ---@field load_token number Monotonic load (convert + page count) id
+---@field zoom number Zoom factor (multiplies the configured dpi)
+---@field convert_token buffer-preview.AsyncJobCancel|nil
+---@field raster_token buffer-preview.AsyncJobCancel|nil
+---@field text_buf number|nil
+---@field text_win number|nil
+---@field text_page number|nil
+---@field text_token number|nil
 
 ---@type table<number, buffer-preview.ViewerState>
 M._states = {}
@@ -46,6 +55,12 @@ local function buf_window(buf)
   return win
 end
 
+---@param state buffer-preview.ViewerState
+---@return number
+local function effective_dpi(state)
+  return math.max(24, math.floor(config.get().dpi * state.zoom + 0.5))
+end
+
 --- Write the status bar and blank canvas into the buffer.
 ---@param state buffer-preview.ViewerState
 ---@param win number|nil
@@ -64,11 +79,16 @@ local function update_status(state, win)
   local filename = vim.fn.fnamemodify(state.source_path, ":t")
   local status
   if state.ready then
+    local zoom = ""
+    if math.abs(state.zoom - 1) > 0.01 then
+      zoom = string.format("  |  %d%%", math.floor(state.zoom * 100 + 0.5))
+    end
     status = string.format(
-      "  %s  |  Page %d / %d  |  q:close  j/k:page  g/G:first/last  <num>G:goto",
+      "  %s  |  Page %d / %d%s  |  j/k:page  +/-:zoom  t:text  y:copy  q:close",
       filename,
       state.current_page,
-      state.page_count
+      state.page_count,
+      zoom
     )
   else
     status = string.format("  %s  |  %s", filename, state.message or "Loading…")
@@ -118,8 +138,9 @@ local function render_page(state)
   state.req = (state.req or 0) + 1
   local req = state.req
   local page = state.current_page
+  local dpi = effective_dpi(state)
 
-  rasterizer.rasterize_page(state.pdf_path, page, function(png_path, err)
+  local token = rasterizer.rasterize_page(state.pdf_path, page, function(png_path, err)
     if not is_alive(state) or state.req ~= req then
       return
     end
@@ -135,10 +156,16 @@ local function render_page(state)
     end
     state.win = current_win
     display.show(png_path, current_win, state.buf)
-  end)
+
+    -- Warm the next page so flipping forward feels instant.
+    if config.get().prefetch and page < state.page_count then
+      rasterizer.prefetch(state.pdf_path, page + 1, dpi)
+    end
+  end, dpi)
+
+  state.raster_token = token
 end
 
---- Navigate to a specific page number (clamped to valid range).
 ---@param state buffer-preview.ViewerState
 ---@param page number
 local function goto_page(state, page)
@@ -153,6 +180,27 @@ local function goto_page(state, page)
 
   state.current_page = page
   render_page(state)
+  if textview.is_open(state) then
+    textview.refresh(state)
+  end
+end
+
+---@param state buffer-preview.ViewerState
+---@param factor number
+local function zoom_by(state, factor)
+  if not is_alive(state) or not state.ready then
+    return
+  end
+  local next_zoom = state.zoom * factor
+  next_zoom = math.max(0.25, math.min(8, next_zoom))
+  if math.abs(next_zoom - 1) < 0.01 then
+    next_zoom = 1
+  end
+  if math.abs(next_zoom - state.zoom) < 1e-6 then
+    return
+  end
+  state.zoom = next_zoom
+  render_page(state)
 end
 
 ---------------------------------------------------------------------------
@@ -162,23 +210,27 @@ end
 ---@param state buffer-preview.ViewerState
 local function setup_keymaps(state)
   local buf = state.buf
+  local cfg = config.get()
   local opts = { buffer = buf, noremap = true, silent = true, nowait = true }
+  local maps = cfg.keymaps or {}
 
-  -- Next page
-  for _, key in ipairs({ "j", "<Down>", "]", "}", "<C-d>", "<C-f>", "<Space>", "l" }) do
-    vim.keymap.set("n", key, function()
-      goto_page(state, state.current_page + 1)
-    end, opts)
+  local function bind(action, fn, extra)
+    for _, key in ipairs(config.keys(maps[action])) do
+      vim.keymap.set("n", key, fn, vim.tbl_extend("force", opts, extra or {}))
+    end
   end
 
-  -- Previous page
-  for _, key in ipairs({ "k", "<Up>", "[", "{", "<C-u>", "<C-b>", "h" }) do
-    vim.keymap.set("n", key, function()
-      goto_page(state, state.current_page - 1)
-    end, opts)
-  end
+  bind("next_page", function()
+    local count = vim.v.count
+    goto_page(state, state.current_page + math.max(count, 1))
+  end)
 
-  -- Mouse-wheel only flips the page when the pointer is over the PDF
+  bind("prev_page", function()
+    local count = vim.v.count
+    goto_page(state, state.current_page - math.max(count, 1))
+  end)
+
+  -- Mouse-wheel only flips the page when the pointer is over the preview
   -- window. When the pointer is elsewhere, return the original keystroke so
   -- Vim re-processes it unmapped — that way the user's own `'mousescroll'`
   -- (and any global wheel mapping) decides what happens. The page flip
@@ -196,42 +248,54 @@ local function setup_keymaps(state)
     return fallback
   end
   local scroll_opts = vim.tbl_extend("force", opts, { expr = true, replace_keycodes = true })
-  vim.keymap.set("n", "<ScrollWheelDown>", function() return scroll(1, "<ScrollWheelDown>") end, scroll_opts)
-  vim.keymap.set("n", "<ScrollWheelUp>", function() return scroll(-1, "<ScrollWheelUp>") end, scroll_opts)
+  vim.keymap.set("n", "<ScrollWheelDown>", function()
+    return scroll(1, "<ScrollWheelDown>")
+  end, scroll_opts)
+  vim.keymap.set("n", "<ScrollWheelUp>", function()
+    return scroll(-1, "<ScrollWheelUp>")
+  end, scroll_opts)
 
-  -- First page (bare `g` with nowait)
-  vim.keymap.set("n", "g", function()
+  -- First page (bare `g` with nowait) / go-to-page with a count.
+  bind("first_page", function()
     local count = vim.v.count
-    if count > 0 then
-      goto_page(state, count)
-    else
-      goto_page(state, 1)
-    end
-  end, opts)
+    goto_page(state, count > 0 and count or 1)
+  end)
 
-  -- Last page / go-to-page with count (e.g. `5G` -> page 5)
-  vim.keymap.set("n", "G", function()
+  -- Last page / go-to-page with a count (e.g. `5G` -> page 5).
+  bind("last_page", function()
     local count = vim.v.count
-    if count > 0 then
-      goto_page(state, count)
-    else
-      goto_page(state, state.page_count)
+    goto_page(state, count > 0 and count or state.page_count)
+  end)
+
+  bind("zoom_in", function()
+    zoom_by(state, cfg.zoom_step)
+  end)
+  bind("zoom_out", function()
+    zoom_by(state, 1 / cfg.zoom_step)
+  end)
+  bind("zoom_reset", function()
+    zoom_by(state, 1 / state.zoom)
+  end)
+
+  bind("page_text", function()
+    textview.toggle(state)
+  end)
+  bind("yank_page_text", function()
+    textview.yank(state)
+  end)
+
+  bind("refresh", function()
+    render_page(state)
+    if textview.is_open(state) then
+      textview.refresh(state)
     end
-  end, opts)
+  end)
 
-  -- Refresh display
-  vim.keymap.set("n", "r", function()
-    render_page(state)
-  end, opts)
-  vim.keymap.set("n", "<C-l>", function()
-    render_page(state)
-  end, opts)
-
-  -- Close viewer
-  vim.keymap.set("n", "q", function()
+  bind("close", function()
+    textview.close(state)
     display.clear(state.buf)
     vim.cmd("bdelete")
-  end, opts)
+  end)
 end
 
 ---------------------------------------------------------------------------
@@ -298,10 +362,19 @@ local function setup_autocmds(state)
       if M._states[state.buf] ~= state then
         return
       end
-      -- Invalidate pending async work (soffice, pdfinfo, rasterizer).
+      -- Invalidate pending async work (soffice, pdfinfo, rasterizer) and
+      -- release the child processes we spawned.
       state.load_token = (state.load_token or 0) + 1
       state.req = (state.req or 0) + 1
+      for _, token in ipairs({ state.convert_token, state.raster_token }) do
+        if token then
+          pcall(token.cancel)
+        end
+      end
+      state.convert_token = nil
+      state.raster_token = nil
       M._states[state.buf] = nil
+      textview.close(state)
       display.clear(state.buf)
       pcall(vim.api.nvim_del_augroup_by_id, group)
     end,
@@ -332,7 +405,8 @@ local function load(state)
     return is_alive(state) and state.load_token == token
   end
 
-  converter.to_pdf(state.source_path, function(pdf_path, convert_err)
+  state.convert_token = converter.to_pdf(state.source_path, function(pdf_path, convert_err)
+    state.convert_token = nil
     if not current() then
       return
     end
@@ -372,6 +446,34 @@ end
 ---------------------------------------------------------------------------
 -- Public API
 ---------------------------------------------------------------------------
+
+--- State of the preview shown in a buffer, if any.
+---@param buf? number
+---@return buffer-preview.ViewerState|nil
+function M.state_for_buf(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  return M._states[buf]
+end
+
+--- Toggle the page-text panel for the preview in the current buffer.
+function M.toggle_text()
+  local state = M.state_for_buf()
+  if not state then
+    vim.notify("buffer-preview.nvim: not a preview buffer", vim.log.levels.WARN)
+    return
+  end
+  textview.toggle(state)
+end
+
+--- Copy the current page's text.
+function M.yank_page_text()
+  local state = M.state_for_buf()
+  if not state then
+    vim.notify("buffer-preview.nvim: not a preview buffer", vim.log.levels.WARN)
+    return
+  end
+  textview.yank(state)
+end
 
 --- Open a supported file in the current buffer as a read-only image viewer.
 ---@param source_path string Path to the source file (may be relative)
@@ -427,6 +529,7 @@ function M.open(source_path)
     ready = false,
     req = 0,
     load_token = 0,
+    zoom = 1,
     message = "Loading…",
   }
 

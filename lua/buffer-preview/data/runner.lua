@@ -65,4 +65,31 @@ function M.run(db_path, sql, callback)
   return parse(vim.system(cmd, { stdin = sql, text = true }):wait())
 end
 
+--- Run SQL and write the result to `out_path` as CSV (asynchronous).
+---@param db_path string
+---@param sql string
+---@param out_path string
+---@param callback fun(ok: boolean, err: string|nil)
+function M.export(db_path, sql, out_path, callback)
+  local cmd = { SQLITE3_BIN, "-header", "-csv", "-bail", db_path }
+  vim.system(cmd, { stdin = sql, text = true }, function(result)
+    vim.schedule(function()
+      if result.code ~= 0 then
+        callback(false, (result.stderr ~= "" and result.stderr) or "sqlite3 exited with an error")
+        return
+      end
+      local lines = vim.split(result.stdout or "", "\n", { plain = true })
+      if lines[#lines] == "" then
+        lines[#lines] = nil
+      end
+      local ok, err = pcall(vim.fn.writefile, lines, out_path)
+      if not ok then
+        callback(false, tostring(err))
+        return
+      end
+      callback(true, nil)
+    end)
+  end)
+end
+
 return M
