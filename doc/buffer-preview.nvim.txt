@@ -52,15 +52,27 @@ Current options configure the PDF / presentation rendering backend: >
       dpi = 200,                            -- rasterization DPI
       cache_dir = vim.fn.stdpath("cache")
                   .. "/buffer-preview.nvim", -- rendered page cache
+      cache_max_age_days = 30,              -- prune older cache entries
     })
+
+Rendering is asynchronous: converting a presentation, reading the page count
+and rasterizing a page all run in the background, so the UI stays responsive
+on large documents.  While a document loads the buffer shows its status line
+with a `Loading...` hint instead of an empty window.
+
+Cached pages are keyed by document path, rasterizer and `dpi`, and are
+invalidated when the source file changes.  Set `cache_max_age_days` to
+`false` to keep cached pages indefinitely.  `:BufferPreviewCleanCache` deletes
+the cache directory.
 
 The SQLite backend has no configuration.
 
 ==============================================================================
 4. Navigation                       *buffer-preview-navigation*
 
-The PDF / presentation buffer is non-editable.  Only the following keys are
-active:
+The PDF / presentation buffer is non-editable.  The displayed page rescales
+automatically when the window is resized (`:vsplit`, `<C-w><`, terminal resize).
+Only the following keys are active:
 
   j, l, <Down>, ], }, <Space>, <C-d>, <C-f>, <ScrollWheelDown>    Next page
   k, h, <Up>,   [, {, <C-u>,   <C-b>,        <ScrollWheelUp>      Previous page
@@ -86,6 +98,9 @@ Running SQL:
 
   :w                        Run the entire bottom buffer as SQL
   :BufferPreviewRunQuery    Run the entire bottom buffer as SQL
+
+Queries run in the background; the top buffer shows `-- Running...` until the
+result is rendered. Only the newest query's result is displayed.
 
 Saving the SQL buffer with `:w` hijacks the write via |BufWriteCmd| — nothing
 touches disk, the SQL just runs and the result renders into the top buffer.

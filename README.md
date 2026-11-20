@@ -27,6 +27,19 @@ context-switching to a separate viewer.
 
 </div>
 
+> This repository is a maintained fork of
+> [propilideno/buffer-preview.nvim](https://github.com/propilideno/buffer-preview.nvim)
+> (upstream has been inactive since 2026-05). Changes in this fork:
+>
+> - the page image rescales with the window (`WinResized`/`VimResized`, resized in place)
+> - mouse-wheel page flipping actually works (the window check used a field that was never set)
+> - clearing a page no longer leaves the old image in image.nvim's registry, which caused two
+>   pages to be drawn on top of each other after scrolling or resizing
+> - conversion, page counting and rasterization are asynchronous, so the UI no longer freezes
+> - cached pages are keyed by `dpi`/rasterizer and invalidated when the source changes
+> - stale cache entries are pruned, `:BufferPreviewCleanCache` wipes them on demand
+
+
 ## Requirements
 
 The requirements depends on which preview you want, install only what you need.
@@ -110,8 +123,15 @@ require("buffer-preview").setup({
   dpi = 200,
   -- Where rendered page PNGs are cached
   cache_dir = vim.fn.stdpath("cache") .. "/buffer-preview.nvim",
+  -- Prune cache entries older than this many days (false = keep forever)
+  cache_max_age_days = 30,
 })
 ```
+
+Rendering is asynchronous (conversion, `pdfinfo` and rasterization all run in
+the background), so the editor never blocks on large documents. Cached pages
+are keyed by path + rasterizer + `dpi` and invalidated when the source changes;
+`:BufferPreviewCleanCache` wipes the cache directory.
 
 ## Features
 

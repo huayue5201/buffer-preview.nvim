@@ -68,6 +68,15 @@ describe("buffer-preview.data.viewer", function()
   local data_viewer = require("buffer-preview.data.viewer")
   local db
 
+  local function top_text(state)
+    return table.concat(vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false), "\n")
+  end
+
+  --- Queries run asynchronously now, so tests wait for the rendered result.
+  local function wait_until(fn)
+    return vim.wait(10000, fn, 10)
+  end
+
   before_each(function()
     if has_sqlite3 then
       db = make_db()
@@ -95,9 +104,12 @@ describe("buffer-preview.data.viewer", function()
     assert.equals(true, vim.bo[state.bottom_buf].modifiable)
 
     local top_lines = vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false)
-    local top_text = table.concat(top_lines, "\n")
-    assert.is_truthy(top_text:match("table"))
-    assert.is_truthy(top_text:match("t"))
+    assert.is_true(wait_until(function()
+      return top_text(state):match("CREATE TABLE t") ~= nil
+    end), table.concat(top_lines, "\n"))
+    local top_text_value = top_text(state)
+    assert.is_truthy(top_text_value:match("table"))
+    assert.is_truthy(top_text_value:match("t"))
   end)
 
   test("runs the query on :w and updates only the top", function()
@@ -110,9 +122,10 @@ describe("buffer-preview.data.viewer", function()
       vim.cmd("silent write")
     end)
 
-    local top_text = table.concat(vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false), "\n")
-    assert.is_truthy(top_text:match("alice"))
-    assert.is_truthy(top_text:match("bob"))
+    assert.is_true(wait_until(function()
+      local text = top_text(state)
+      return text:match("alice") ~= nil and text:match("bob") ~= nil
+    end), top_text(state))
 
     local bottom_after = vim.api.nvim_buf_get_lines(state.bottom_buf, 0, -1, false)
     assert.are.same(sql, bottom_after)
@@ -130,8 +143,11 @@ describe("buffer-preview.data.viewer", function()
       vim.cmd("BufferPreviewRunQuery")
     end)
 
-    local top_lines = vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false)
-    assert.are.same({ "Query executed successfully" }, top_lines)
+    assert.is_true(wait_until(function()
+      local lines = vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false)
+      return #lines == 1 and lines[1] == "Query executed successfully"
+    end), top_text(state))
+    assert.are.same({ "Query executed successfully" }, vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false))
   end)
 
   test("shows error output for invalid queries", function()
@@ -145,8 +161,11 @@ describe("buffer-preview.data.viewer", function()
       vim.cmd("BufferPreviewRunQuery")
     end)
 
-    local top_text = table.concat(vim.api.nvim_buf_get_lines(state.top_buf, 0, -1, false), "\n")
-    assert.is_truthy(top_text:match("-- Error"))
-    assert.is_truthy(top_text:lower():match("no such table"))
+    assert.is_true(wait_until(function()
+      return top_text(state):lower():match("no such table") ~= nil
+    end), top_text(state))
+    local top = top_text(state)
+    assert.is_truthy(top:match("-- Error"))
+    assert.is_truthy(top:lower():match("no such table"))
   end)
 end)
